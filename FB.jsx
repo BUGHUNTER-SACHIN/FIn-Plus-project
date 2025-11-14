@@ -1,21 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-    getAuth, 
-    onAuthStateChanged, 
-    signInAnonymously, 
-    signInWithCustomToken 
-} from 'firebase/auth';
-import { 
-    getFirestore, 
-    doc, 
-    setDoc, 
-    getDoc, 
-    onSnapshot, 
-    collection, 
-    addDoc,
-    deleteDoc
-} from 'firebase/firestore';
+import { isMockFirebase, db, signInAnonymouslyClient, signInWithCustomTokenClient, onAuthStateChangedClient, signInWithGoogleClient } from './firebaseClient';
+import Login from './Login.jsx';
 import { Chart, registerables } from 'chart.js/auto';
 // --- FIX 1: Added date adapter for time-scale charts ---
 // You must install this: npm install chartjs-adapter-date-fns date-fns
@@ -88,19 +73,8 @@ const NewspaperIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-newspaper"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h0a2 2 0 0 1 2 2v9Z"/><path d="M18 22h-8v-9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v9Z"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
 );
 
-// --- Firebase Configuration ---
-// This configuration is provided by the environment.
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-    ? JSON.parse(__firebase_config) 
-    : { apiKey: "YOUR_FALLBACK_API_KEY", authDomain: "...", projectId: "..." };
-
 // This App ID is provided by the environment.
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'finpulse-default';
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
 
 // --- API Configuration ---
 // --- FIX 2: Emptied API keys for security. ---
@@ -142,11 +116,15 @@ const mockHistoricalData = {
 };
 
 // --- Helper Functions ---
+// Current selected currency (module-level). Updated from `App` to trigger formatting changes.
+let currentCurrency = 'USD';
+const setCurrentCurrency = (cur) => { currentCurrency = cur; };
+
 const formatCurrency = (number) => {
     if (typeof number !== 'number') return number;
     return new Intl.NumberFormat('en-US', {
         style: 'currency',
-        currency: 'USD',
+        currency: currentCurrency,
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     }).format(number);
@@ -180,11 +158,15 @@ const calculateSMA = (data, period) => {
 const App = () => {
     const [darkMode, setDarkMode] = useState(true);
     const [view, setView] = useState('dashboard'); // 'dashboard' or 'asset_detail'
+    const [currency, setCurrency] = useState('USD');
     const [selectedAsset, setSelectedAsset] = useState(null);
     const [marketData, setMarketData] = useState(mockMarketData);
+    const originalMarketDataRef = useRef([]); // keep base USD values
+    const [exchangeRates, setExchangeRates] = useState({ USD: 1, EUR: 0.92, GBP: 0.79, INR: 83 });
     const [loading, setLoading] = useState(true);
     const [message, setMessage] = useState(null); // For alerts
     const [userId, setUserId] = useState(null);
+    const [user, setUser] = useState(null);
     // --- FIX 3: Corrected comment for clarity ---
     const [portfolio, setPortfolio] = useState([]); // List of asset objects from Firestore
     const [isAuthReady, setIsAuthReady] = useState(false);
@@ -198,51 +180,102 @@ const App = () => {
         }
     }, [darkMode]);
 
+    // Keep module-level formatter in sync so top-level helpers use the selected currency
+    useEffect(() => { setCurrentCurrency(currency); }, [currency]);
+
+    // Try to fetch live exchange rates (base USD). If it fails, we keep the fallback rates above.
+    useEffect(() => {
+        const fetchRates = async () => {
+            try {
+                const res = await fetch('https://api.exchangerate.host/latest?base=USD&symbols=USD,EUR,GBP,INR');
+                if (!res.ok) throw new Error('Failed to fetch rates');
+                const json = await res.json();
+                const rates = json.rates || {};
+                setExchangeRates((prev) => ({
+                    USD: 1,
+                    EUR: rates.EUR || prev.EUR,
+                    GBP: rates.GBP || prev.GBP,
+                    INR: rates.INR || prev.INR,
+                }));
+            } catch (e) {
+                console.warn('Could not fetch exchange rates, using fallback rates.', e);
+            }
+        };
+        fetchRates();
+    }, []);
+
     // --- Firebase Auth & Data ---
     useEffect(() => {
         const initAuth = async () => {
             try {
                 const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
                 if (token) {
-                    await signInWithCustomToken(auth, token);
+                    await signInWithCustomTokenClient(token);
                 } else {
-                    await signInAnonymously(auth);
+                    await signInAnonymouslyClient();
                 }
             } catch (error) {
-                console.error("Firebase Auth Error:", error);
+                console.error("Firebase/Auth Error:", error);
                 setMessage({ type: 'error', text: 'Authentication failed. Please refresh.' });
             }
         };
 
-        const unsubscribe = onAuthStateChanged(auth, (user) => {
-            if (user) {
-                setUserId(user.uid);
+        const unsubscribe = onAuthStateChangedClient((u) => {
+            if (u) {
+                setUserId(u.uid);
+                setUser(u);
             } else {
                 setUserId(null);
+                setUser(null);
             }
             setIsAuthReady(true);
         });
 
         initAuth();
-        return () => unsubscribe();
+        return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
     }, []);
 
     // Effect to fetch/subscribe to portfolio data AFTER auth is ready
     useEffect(() => {
         if (!isAuthReady || !userId) return;
 
+        // If Firebase is not configured, load a local mock portfolio from localStorage
+        if (isMockFirebase || !db) {
+            try {
+                const key = `mock_portfolio_${appId}_${userId}`;
+                const stored = localStorage.getItem(key);
+                if (stored) setPortfolio(JSON.parse(stored));
+            } catch (e) {
+                console.warn('Failed to load mock portfolio from localStorage', e);
+            }
+            return;
+        }
+
         const portfolioCollectionPath = `/artifacts/${appId}/users/${userId}/portfolio`;
-        const portfolioCollection = collection(db, portfolioCollectionPath);
 
-        const unsubscribe = onSnapshot(portfolioCollection, (snapshot) => {
-            const userPortfolio = snapshot.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
-            setPortfolio(userPortfolio);
-        }, (error) => {
-            console.error("Firestore Snapshot Error:", error);
-            setMessage({ type: 'error', text: 'Could not load portfolio.' });
-        });
+        // Dynamically import Firestore helpers only when a real `db` exists.
+        let unsubscribeFn;
+        const setup = async () => {
+            try {
+                const { collection, onSnapshot } = await import('firebase/firestore');
+                const portfolioCollection = collection(db, portfolioCollectionPath);
 
-        return () => unsubscribe();
+                unsubscribeFn = onSnapshot(portfolioCollection, (snapshot) => {
+                    const userPortfolio = snapshot.docs.map(d => ({ ...d.data(), firestoreId: d.id }));
+                    setPortfolio(userPortfolio);
+                }, (error) => {
+                    console.error("Firestore Snapshot Error:", error);
+                    setMessage({ type: 'error', text: 'Could not load portfolio.' });
+                });
+            } catch (e) {
+                console.error('Failed to initialize Firestore listener', e);
+                setMessage({ type: 'error', text: 'Could not initialize portfolio listener.' });
+            }
+        };
+
+        setup();
+
+        return () => { if (typeof unsubscribeFn === 'function') unsubscribeFn(); };
 
     }, [isAuthReady, userId]);
 
@@ -256,13 +289,36 @@ const App = () => {
         const assetInPortfolio = portfolio.find(p => p.id === asset.id);
 
         try {
+            if (isMockFirebase || !db) {
+                // Update local mock portfolio and persist to localStorage
+                let newPortfolio;
+                if (assetInPortfolio) {
+                    newPortfolio = portfolio.filter(p => p.id !== asset.id);
+                    setMessage({ type: 'success', text: `${asset.name} removed from portfolio (local).` });
+                } else {
+                    const newItem = { ...asset, firestoreId: `local-${Date.now()}` };
+                    newPortfolio = [...portfolio, newItem];
+                    setMessage({ type: 'success', text: `${asset.name} added to portfolio (local).` });
+                }
+                setPortfolio(newPortfolio);
+                try {
+                    const key = `mock_portfolio_${appId}_${userId}`;
+                    localStorage.setItem(key, JSON.stringify(newPortfolio));
+                } catch (e) {
+                    console.warn('Failed to persist mock portfolio to localStorage', e);
+                }
+                return;
+            }
+
             if (assetInPortfolio) {
-                // Remove from portfolio
+                // Remove from portfolio (Firestore)
+                const { doc, deleteDoc } = await import('firebase/firestore');
                 const docRef = doc(db, portfolioPath, assetInPortfolio.firestoreId);
                 await deleteDoc(docRef);
                 setMessage({ type: 'success', text: `${asset.name} removed from portfolio.` });
             } else {
-                // Add to portfolio
+                // Add to portfolio (Firestore)
+                const { collection, addDoc } = await import('firebase/firestore');
                 const { id, name, symbol, image, isStock } = asset;
                 await addDoc(collection(db, portfolioPath), {
                     id,
@@ -284,35 +340,76 @@ const App = () => {
         const fetchMarketData = async () => {
             setLoading(true);
             try {
-                // Keys are intentionally empty in this repo for security.
-                // If you want real data, provide `COINGECKO_API_KEY` via environment
-                // and uncomment the real API call below.
+                const currencyLower = (currency || 'USD').toLowerCase();
 
-                /*
-                if (COINGECKO_API_KEY) {
-                    const cryptoUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false&api_key=${COINGECKO_API_KEY}`;
-                    const cryptoRes = await fetch(cryptoUrl);
-                    const cryptoData = await cryptoRes.json();
-                    // combine with stock data or map as needed
-                    setMarketData(cryptoData);
-                } else {
-                    setMarketData(mockMarketData);
+                // First, try to fetch USD base data for a reliable original dataset (used as fallback conversion source)
+                try {
+                    const usdUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false`;
+                    const usdRes = await fetch(usdUrl);
+                    if (usdRes.ok) {
+                        const usdData = await usdRes.json();
+                        originalMarketDataRef.current = usdData.map(d => ({ ...d }));
+                    } else {
+                        // keep previous original or mock
+                        if (!originalMarketDataRef.current || originalMarketDataRef.current.length === 0) {
+                            originalMarketDataRef.current = JSON.parse(JSON.stringify(mockMarketData));
+                        }
+                    }
+                } catch (e) {
+                    if (!originalMarketDataRef.current || originalMarketDataRef.current.length === 0) {
+                        originalMarketDataRef.current = JSON.parse(JSON.stringify(mockMarketData));
+                    }
                 }
-                */
 
-                // Use mock data for safe local development
-                setMarketData(mockMarketData);
+                // Then try to fetch data in the selected currency (this gives live prices in that currency)
+                try {
+                    const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=${currencyLower}&order=market_cap_desc&per_page=100&page=1&sparkline=false`;
+                    const res = await fetch(url);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setMarketData(data.map(d => ({ ...d })));
+                    } else {
+                        // Fallback: convert the stored USD originals using exchangeRates
+                        const rate = exchangeRates[currency] || 1;
+                        const converted = originalMarketDataRef.current.map((item) => ({
+                            ...item,
+                            current_price: typeof item.current_price === 'number' ? +(item.current_price * rate) : item.current_price,
+                            market_cap: typeof item.market_cap === 'number' ? +(item.market_cap * rate) : item.market_cap,
+                            total_volume: typeof item.total_volume === 'number' ? +(item.total_volume * rate) : item.total_volume,
+                        }));
+                        setMarketData(converted);
+                    }
+                } catch (e) {
+                    // Network error fetching currency-specific data: fallback to conversion
+                    const rate = exchangeRates[currency] || 1;
+                    const converted = originalMarketDataRef.current.map((item) => ({
+                        ...item,
+                        current_price: typeof item.current_price === 'number' ? +(item.current_price * rate) : item.current_price,
+                        market_cap: typeof item.market_cap === 'number' ? +(item.market_cap * rate) : item.market_cap,
+                        total_volume: typeof item.total_volume === 'number' ? +(item.total_volume * rate) : item.total_volume,
+                    }));
+                    setMarketData(converted);
+                }
+
             } catch (error) {
                 console.error("Failed to fetch market data:", error);
                 setMessage({ type: 'error', text: 'Failed to load market data.' });
-                setMarketData(mockMarketData);
+                originalMarketDataRef.current = JSON.parse(JSON.stringify(mockMarketData));
+                const rate = exchangeRates[currency] || 1;
+                const converted = originalMarketDataRef.current.map((item) => ({
+                    ...item,
+                    current_price: typeof item.current_price === 'number' ? +(item.current_price * rate) : item.current_price,
+                    market_cap: typeof item.market_cap === 'number' ? +(item.market_cap * rate) : item.market_cap,
+                    total_volume: typeof item.total_volume === 'number' ? +(item.total_volume * rate) : item.total_volume,
+                }));
+                setMarketData(converted);
             } finally {
                 setLoading(false);
             }
         };
 
         fetchMarketData();
-    }, []);
+    }, [currency, exchangeRates]);
 
     const handleSelectAsset = (asset) => {
         setSelectedAsset(asset);
@@ -328,8 +425,23 @@ const App = () => {
 
     return (
         <div className={`min-h-screen ${darkMode ? 'dark' : ''} bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200 font-inter`}>
-            <Header darkMode={darkMode} setDarkMode={setDarkMode} userId={userId} />
+            <Header 
+                darkMode={darkMode} 
+                setDarkMode={setDarkMode} 
+                currency={currency} 
+                onCurrencyChange={setCurrency} 
+                userId={userId} 
+                user={user}
+                onLoginClick={() => setView('login')}
+                onLinkGoogle={async () => { try { await signInWithGoogleClient(); } catch(e){ console.error(e); setMessage({type:'error', text:'Google sign-in failed'}); } }}
+                onUnlinkGoogle={async () => { try { await unlinkGoogleClient(); } catch(e){ console.error(e); setMessage({type:'error', text:'Could not unlink Google'}); } }}
+                onSignOut={async () => { try { await signOutClient(); setUser(null); setUserId(null); } catch(e){ console.error(e); } }}
+            />
             <Ticker marketData={marketData} onSelectAsset={handleSelectAsset} />
+
+            {view === 'login' && (
+                <Login onClose={() => setView('dashboard')} onSuccess={() => setView('dashboard')} />
+            )}
 
             {message && (
                 <MessageBox 
@@ -356,6 +468,8 @@ const App = () => {
                         onBack={handleViewDashboard} 
                         onTogglePortfolio={handleTogglePortfolio}
                         isinPortfolio={portfolioAssetIds.has(selectedAsset.id)}
+                        currency={currency}
+                        exchangeRates={exchangeRates}
                     />
                 )}
             </main>
@@ -364,7 +478,16 @@ const App = () => {
 };
 
 // --- Header Component ---
-const Header = ({ darkMode, setDarkMode, userId }) => {
+const Header = ({ darkMode, setDarkMode, userId, user, onLoginClick, onLinkGoogle, onUnlinkGoogle, onSignOut, currency = 'USD', onCurrencyChange = () => {} }) => {
+    const [openCurrency, setOpenCurrency] = useState(false);
+    const currencies = ['USD', 'EUR', 'GBP', 'INR'];
+    const [openAccount, setOpenAccount] = useState(false);
+
+    const handleSelectCurrency = (c) => {
+        onCurrencyChange(c);
+        setOpenCurrency(false);
+    };
+
     return (
         <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-50">
             <nav className="container mx-auto p-4 flex justify-between items-center max-w-7xl">
@@ -372,24 +495,71 @@ const Header = ({ darkMode, setDarkMode, userId }) => {
                     <div className="text-2xl font-bold text-blue-600 dark:text-blue-500">
                         FinPulse
                     </div>
-                    {/* Optional: User ID display for multi-user context */}
-                    {/* {userId && <span className="text-xs text-gray-400 hidden md:block">{userId}</span>} */}
                 </div>
-                <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-4 relative">
                     <button
                         onClick={() => setDarkMode(!darkMode)}
                         className="p-2 rounded-full text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        aria-label="Toggle dark mode"
                     >
                         {darkMode ? <SunIcon /> : <MoonIcon />}
                     </button>
-                    <button className="flex items-center space-x-1 px-3 py-2 rounded-md bg-gray-100 dark:bg-gray-700 text-sm font-medium">
-                        <span>USD</span>
-                        <ChevronDownIcon />
-                    </button>
-                    <button className="hidden md:flex items-center space-x-2 px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700">
-                        <UserIcon />
-                        <span>{userId ? 'Account' : 'Login'}</span>
-                    </button>
+
+                    <div className="relative">
+                        <button onClick={() => setOpenCurrency(!openCurrency)} className="flex items-center space-x-1 px-3 py-2 rounded-md bg-gray-100 dark:bg-gray-700 text-sm font-medium">
+                            <span>{currency}</span>
+                            <ChevronDownIcon />
+                        </button>
+
+                        {openCurrency && (
+                            <div className="absolute right-0 mt-2 w-36 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow z-40">
+                                {currencies.map((c) => (
+                                    <button
+                                        key={c}
+                                        onClick={() => handleSelectCurrency(c)}
+                                        className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 ${c === currency ? 'font-semibold' : ''}`}
+                                    >
+                                        {c}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="relative">
+                        <button onClick={() => setOpenAccount(!openAccount)} className="hidden md:flex items-center space-x-2 px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700">
+                            <UserIcon />
+                            <span>{userId ? (user?.provider === 'google' ? (user.email || 'Account') : 'Account') : 'Login'}</span>
+                        </button>
+
+                        {openAccount && (
+                            <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow z-40">
+                                <div className="px-3 py-2 text-sm text-gray-700 dark:text-gray-200 border-b border-gray-100 dark:border-gray-700">
+                                    {userId ? (
+                                        <div>
+                                            <div className="font-medium">{user?.displayName || 'User'}</div>
+                                            <div className="text-xs text-gray-500 dark:text-gray-400">{user?.email || (user?.isAnonymous ? 'Anonymous' : '')}</div>
+                                        </div>
+                                    ) : (
+                                        <div className="font-medium">Not signed in</div>
+                                    )}
+                                </div>
+                                <div className="flex flex-col">
+                                    {user && user.isAnonymous && (
+                                        <button onClick={() => { onLinkGoogle && onLinkGoogle(); setOpenAccount(false); }} className="text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">Link Google account</button>
+                                    )}
+                                    {user && user.provider === 'google' && (
+                                        <button onClick={() => { onUnlinkGoogle && onUnlinkGoogle(); setOpenAccount(false); }} className="text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">Unlink Google</button>
+                                    )}
+                                    {userId ? (
+                                        <button onClick={() => { onSignOut && onSignOut(); setOpenAccount(false); }} className="text-left px-3 py-2 text-sm text-red-600 hover:bg-gray-100 dark:hover:bg-gray-700">Sign out</button>
+                                    ) : (
+                                        <button onClick={() => { onLoginClick && onLoginClick(); setOpenAccount(false); }} className="text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700">Sign in</button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </nav>
         </header>
@@ -772,18 +942,46 @@ const Portfolio = ({ portfolio, marketData, onSelectAsset }) => {
 };
 
 // --- AssetDetail Component ---
-const AssetDetail = ({ asset, onBack, onTogglePortfolio, isinPortfolio }) => {
+const AssetDetail = ({ asset, onBack, onTogglePortfolio, isinPortfolio, currency = 'USD', exchangeRates = { USD:1 } }) => {
     const [historicalData, setHistoricalData] = useState(null);
     const [trend, setTrend] = useState({ direction: '...', color: 'text-gray-500' });
+    const [hasHistorical, setHasHistorical] = useState(true);
 
     useEffect(() => {
-        // Using mock data (replace with API call for production)
-        const data = mockHistoricalData[asset.id];
-        setHistoricalData(data);
+        // Resolve historical data by several fallbacks: id, symbol, or name matching
+        const tryFindSeries = () => {
+            if (!asset) return [];
+            const idCandidates = [];
+            if (asset.id) idCandidates.push(asset.id);
+            if (asset.symbol) idCandidates.push(asset.symbol.toLowerCase());
+            if (asset.name) idCandidates.push(asset.name.toLowerCase().replace(/\s+/g, ''));
+
+            for (const cand of idCandidates) {
+                if (mockHistoricalData[cand]) return mockHistoricalData[cand];
+            }
+
+            // fallback: try to find by symbol contained in keys
+            const foundKey = Object.keys(mockHistoricalData).find(k => k.includes((asset.symbol || '').toLowerCase()));
+            if (foundKey) return mockHistoricalData[foundKey];
+
+            return [];
+        };
+
+        const base = tryFindSeries();
+        if (!base || base.length === 0) {
+            setHasHistorical(false);
+            setHistoricalData([]);
+            return;
+        }
+
+        setHasHistorical(true);
+        const rate = (exchangeRates && exchangeRates[currency]) ? exchangeRates[currency] : 1;
+        const scaled = base.map(d => [d[0], +(d[1] * rate)]);
+        setHistoricalData(scaled);
 
         // Calculate Trend Prediction
-        const sma20 = calculateSMA(data, 20);
-        const sma50 = calculateSMA(data, 50);
+        const sma20 = calculateSMA(scaled, 20);
+        const sma50 = calculateSMA(scaled, 50);
 
         if (sma20.length > 0 && sma50.length > 0) {
             const lastSMA20 = sma20[sma20.length - 1][1];
@@ -794,7 +992,7 @@ const AssetDetail = ({ asset, onBack, onTogglePortfolio, isinPortfolio }) => {
                 setTrend({ direction: 'DOWN', color: 'text-red-500' });
             }
         }
-    }, [asset.id]);
+    }, [asset, currency, exchangeRates]);
 
     return (
         <div className="space-y-6">
@@ -855,7 +1053,8 @@ const AssetChart = ({ historicalData, asset }) => {
     const chartInstance = useRef(null);
 
     useEffect(() => {
-        if (!chartRef.current || !historicalData) return;
+        if (!chartRef.current) return;
+        if (!historicalData || historicalData.length === 0) return;
 
         // Destroy previous chart instance if it exists
         if (chartInstance.current) {
@@ -948,8 +1147,12 @@ const AssetChart = ({ historicalData, asset }) => {
         };
     }, [historicalData, asset]);
 
-    if (!historicalData) {
-        return <LoadingSpinner />;
+    if (!historicalData || historicalData.length === 0) {
+        return (
+            <div className="h-64 md:h-96 flex items-center justify-center text-sm text-gray-500 dark:text-gray-400">
+                No historical data available for this asset.
+            </div>
+        );
     }
 
     return <div className="h-64 md:h-96"><canvas ref={chartRef}></canvas></div>;
