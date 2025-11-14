@@ -1,0 +1,74 @@
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.login-container {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 40px;
+  border-radius: 15px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  text-align: center;
+  width: 300px;
+  animation: fadeIn 1s ease forwards;
+}
+
+.login-form input,
+.login-form button {
+  width: 100%;
+  padding: 12px;
+  margin: 12px 0;
+  border: none;
+  border-radius: 8px;
+  font-size: 1em;
+}
+
+.login-form input {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.login-form button {
+  background-color: #00c6ff;
+  color: white;
+  cursor: pointer;
+  transition: background 0.3s ease;
+}
+
+.login-form button:hover {
+  background-color: #0072ff;
+}
+
+/* Animations */
+.fade-in {
+  opacity: 0;
+  animation: fadeIn 1s ease forwards;
+}
+
+.slide-in {
+  transform: translateY(20px);
+  opacity: 0;
+  animation: slideIn 0.8s ease forwards;
+}
+
+.delay-1 { animation-delay: 0.5s; }
+.delay-2 { animation-delay: 1s; }
+.delay-3 { animation-delay: 1.5s; }
+.delay-4 { animation-delay: 2s; }
+
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+
+@keyframes slideIn {
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
