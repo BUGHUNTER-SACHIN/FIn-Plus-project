@@ -284,27 +284,31 @@ const App = () => {
         const fetchMarketData = async () => {
             setLoading(true);
             try {
-                // --- NOTE: Real API calls commented out as keys are (correctly) empty. ---
-                // The app will now use mock data by default.
-                
-                // --- REAL API CALL (CRYPTO) ---
-                // if (COINGECKO_API_KEY) {
-                //     const cryptoUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false&api_key=${COINGECKO_API_KEY}`;
-                //     const cryptoRes = await fetch(cryptoUrl);
-                //     const cryptoData = await cryptoRes.json();
-                //     // ... combine with stock data
-                // } else {
-                //     setMarketData(mockMarketData);
-                // }
+                // Keys are intentionally empty in this repo for security.
+                // If you want real data, provide `COINGECKO_API_KEY` via environment
+                // and uncomment the real API call below.
 
-                // For this demo, we use mock data
+                /*
+                if (COINGECKO_API_KEY) {
+                    const cryptoUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false&api_key=${COINGECKO_API_KEY}`;
+                    const cryptoRes = await fetch(cryptoUrl);
+                    const cryptoData = await cryptoRes.json();
+                    // combine with stock data or map as needed
+                    setMarketData(cryptoData);
+                } else {
+                    setMarketData(mockMarketData);
+                }
+                */
+
+                // Use mock data for safe local development
                 setMarketData(mockMarketData);
             } catch (error) {
                 console.error("Failed to fetch market data:", error);
                 setMessage({ type: 'error', text: 'Failed to load market data.' });
-                setMarketData(mockMarketData); // Fallback
+                setMarketData(mockMarketData);
+            } finally {
+                setLoading(false);
             }
-            setLoading(false);
         };
 
         fetchMarketData();
@@ -1033,6 +1037,8 @@ const MessageBox = ({ type, text, onDismiss }) => {
         </div>
     );
 };
+
+export default App;
 
 // Register Chart.js components
 Chart.register(...registerables);
